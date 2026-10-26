@@ -26,6 +26,11 @@
   const unlocked = new Set([1, ...(Array.isArray(savedUnlocks) ? savedUnlocks.filter(n => Number.isInteger(n) && n >= 1 && n <= 10) : [])]);
   let muted = read('muted', false) === true;
   let musicOn = read('music', false) === true;
+  const savedVolume = key => {
+    const value = read(key, 80);
+    return Number.isFinite(value) ? clamp(Math.round(value), 0, 100) : 80;
+  };
+  let sfxVolume = savedVolume('sfxVolume'), musicVolume = savedVolume('musicVolume');
   function haptic(pattern) {
     try {
       if (navigator.userActivation && !navigator.userActivation.hasBeenActive) return;
@@ -33,22 +38,55 @@
     } catch { /* Not supported by every browser. */ }
   }
 
-  // Audio starts only after a gesture. SFX and music have independent buses.
-  let audio, sfxBus, musicBus, musicTimer, musicStep = 0, musicNext = 0;
-  const musicVoices = new Set();
+  // Independent volume buses share a master and a gentle limiter, with headroom
+  // for overlapping chimes. Never create a context before a user gesture.
+  let audio, sfxBus, musicBus, master, compressor, musicTimer, musicStep = 0, musicNext = 0;
+  let audioGesture = false, audioUnlocked = false, lastPreview = -Infinity;
+  const musicVoices = new Set(), sfxVoices = new Set();
+  function applyAudioVolumes(timeConstant = .025) {
+    if (!audio) return;
+    const t = audio.currentTime;
+    sfxBus.gain.cancelScheduledValues(t);
+    sfxBus.gain.setTargetAtTime(muted ? 0 : sfxVolume / 100, t, timeConstant);
+    musicBus.gain.cancelScheduledValues(t);
+    musicBus.gain.setTargetAtTime(musicOn && musicTimer && !document.hidden ? musicVolume / 100 : 0, t, timeConstant);
+  }
   function ensureAudio() {
     try {
-      if (navigator.userActivation && !navigator.userActivation.hasBeenActive) return false;
+      if (!audio && !audioGesture) return false;
       const AudioContext = window.AudioContext || window.webkitAudioContext;
       if (!AudioContext) return false;
       if (!audio) {
         audio = new AudioContext();
-        sfxBus = audio.createGain(); sfxBus.gain.value = muted ? 0 : .7; sfxBus.connect(audio.destination);
-        musicBus = audio.createGain(); musicBus.gain.value = 0; musicBus.connect(audio.destination);
+        master = audio.createGain(); master.gain.value = .85;
+        compressor = audio.createDynamicsCompressor();
+        compressor.threshold.value = -10; compressor.knee.value = 6; compressor.ratio.value = 8;
+        compressor.attack.value = .003; compressor.release.value = .2;
+        master.connect(compressor); compressor.connect(audio.destination);
+        sfxBus = audio.createGain(); sfxBus.gain.value = muted ? 0 : sfxVolume / 100; sfxBus.connect(master);
+        musicBus = audio.createGain(); musicBus.gain.value = 0; musicBus.connect(master);
       }
-      if (audio.state === 'suspended') audio.resume().catch(() => {});
+      if (audio.state === 'suspended' || audio.state === 'interrupted') audio.resume().catch(() => {});
       return true;
     } catch { return false; }
+  }
+  function unlockAudio() {
+    audioGesture = true;
+    if (!ensureAudio()) return;
+    // iOS needs a buffer started inside the gesture, even when it is silent.
+    if (!audioUnlocked) {
+      try {
+        const source = audio.createBufferSource();
+        source.buffer = audio.createBuffer(1, 1, audio.sampleRate);
+        source.connect(master);
+        source.onended = () => { audioUnlocked = audio.state === 'running'; source.disconnect(); };
+        source.start(0);
+      } catch { /* A later gesture can retry the unlock. */ }
+    }
+    if (musicOn) startMusic();
+  }
+  for (const type of ['pointerdown', 'touchend', 'keydown']) {
+    document.addEventListener(type, unlockAudio, { capture: true, passive: true });
   }
   function tone(bus, frequency, start, duration, volume, type = 'sine', attack = .025, tracked = false) {
     const oscillator = audio.createOscillator(), gain = audio.createGain();
@@ -56,19 +94,31 @@
     gain.gain.setValueAtTime(0, start);
     gain.gain.linearRampToValueAtTime(volume, start + attack);
     gain.gain.exponentialRampToValueAtTime(.0001, start + duration);
+    gain.gain.linearRampToValueAtTime(0, start + duration + .03);
     oscillator.connect(gain); gain.connect(bus); oscillator.start(start); oscillator.stop(start + duration + .05);
-    if (tracked) musicVoices.add(oscillator);
-    oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); musicVoices.delete(oscillator); };
+    const voices = tracked ? musicVoices : sfxVoices;
+    voices.add(oscillator);
+    oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); voices.delete(oscillator); };
   }
   function sound(kind, level = 1) {
-    if (muted || !ensureAudio()) return;
+    if (muted || sfxVolume === 0 || !ensureAudio()) return;
     try {
+      level = clamp(Number(level) || 1, 1, 10);
       const t = audio.currentTime + .008;
       const notes = kind === 'unlock' ? [523.25, 659.25, 783.99, 1046.5]
-        : kind === 'over' ? [329.63, 261.63, 196]
-          : kind === 'merge' ? [261.63 * 2 ** (level / 12), 392 * 2 ** (level / 12)] : [293.66];
-      notes.forEach((frequency, i) => tone(sfxBus, frequency, t + i * .09,
-        kind === 'drop' ? .22 : .62, kind === 'drop' ? .026 : .036, i % 2 ? 'triangle' : 'sine', .018));
+        : kind === 'over' ? [783.99, 659.25, 523.25]
+          : kind === 'merge' ? [523.25 * 2 ** (level / 12), 783.99 * 2 ** (level / 12)] : [587.33];
+      const duration = kind === 'drop' ? .24 : kind === 'preview' ? .3 : .62;
+      const volume = kind === 'drop' || kind === 'preview' ? .085 : .115;
+      notes.forEach((frequency, i) => {
+        // Bound dense merge cascades; each soft chime has a fundamental,
+        // a fifth and an octave, concentrated in phone-friendly midrange.
+        if (sfxVoices.size + 3 > 36) return;
+        const start = t + i * .09;
+        tone(sfxBus, frequency, start, duration, volume, 'sine', .018);
+        tone(sfxBus, frequency * 1.5, start, duration * .75, volume * .28, 'sine', .025);
+        tone(sfxBus, frequency * 2, start, duration * .85, volume * .36, 'sine', .022);
+      });
     } catch { /* Audio never blocks play. */ }
   }
   function scheduleMusic() {
@@ -76,8 +126,13 @@
     const chords = [[130.81, 164.81, 196], [110, 130.81, 164.81], [87.31, 130.81, 174.61], [98, 146.83, 196]];
     while (musicNext < audio.currentTime + .4) {
       const chord = chords[Math.floor(musicStep / 8) % chords.length];
-      if (musicStep % 8 === 0) chord.forEach(f => tone(musicBus, f, musicNext, 6.8, .013, 'sine', 1.4, true));
-      tone(musicBus, chord[[0, 2, 1, 2][musicStep % 4]] * 4, musicNext, 2.2, .009, 'triangle', .09, true);
+      if (musicStep % 8 === 0) chord.forEach(f => {
+        tone(musicBus, f * 4, musicNext, 6.8, .045, 'sine', 1.4, true);
+        tone(musicBus, f * 8, musicNext, 5.8, .012, 'sine', 1.2, true);
+      });
+      const frequency = chord[[0, 2, 1, 2][musicStep % 4]] * 8;
+      tone(musicBus, frequency, musicNext, 2.2, .034, 'sine', .09, true);
+      tone(musicBus, frequency * 2, musicNext, 1.8, .011, 'sine', .12, true);
       musicStep++; musicNext += .85;
     }
   }
@@ -93,7 +148,7 @@
   function startMusic() {
     if (!musicOn || musicTimer || document.hidden || !ensureAudio()) return;
     musicBus.gain.cancelScheduledValues(audio.currentTime);
-    musicBus.gain.setTargetAtTime(.7, audio.currentTime, .5);
+    musicBus.gain.setTargetAtTime(musicVolume / 100, audio.currentTime, .5);
     musicNext = audio.currentTime + .06; scheduleMusic();
     musicTimer = setInterval(scheduleMusic, 200);
   }
@@ -101,18 +156,39 @@
     $('mute').setAttribute('aria-pressed', String(muted));
     $('mute').setAttribute('aria-label', muted ? '开启音效' : '关闭音效');
     $('mute').title = muted ? '开启音效' : '关闭音效';
+    $('settings-mute').setAttribute('aria-pressed', String(!muted));
+    $('settings-mute').querySelector('.toggle-label').textContent = muted ? '已关闭' : '已开启';
     $('music').setAttribute('aria-pressed', String(musicOn));
     $('music').setAttribute('aria-label', musicOn ? '关闭背景音乐' : '开启背景音乐');
     $('music').title = musicOn ? '关闭背景音乐' : '开启背景音乐';
+    $('music').querySelector('.toggle-label').textContent = musicOn ? '已开启' : '已关闭';
+    for (const [kind, volume] of [['sfx', sfxVolume], ['music', musicVolume]]) {
+      const slider = $(kind + '-volume');
+      slider.value = volume; slider.style.setProperty('--volume', `${volume}%`);
+      slider.setAttribute('aria-valuetext', `${volume}%`);
+      $(kind + '-percent').textContent = `${volume}%`;
+    }
   }
-  $('mute').addEventListener('click', () => {
+  function toggleMute() {
     muted = !muted; write('muted', muted); syncAudioButtons();
-    if (ensureAudio()) sfxBus.gain.setTargetAtTime(muted ? 0 : .7, audio.currentTime, .03);
+    if (ensureAudio()) applyAudioVolumes();
     if (!muted) sound('drop');
-  });
-  $('music').addEventListener('click', () => {
-    musicOn = !musicOn; write('music', musicOn); syncAudioButtons();
+  }
+  function setMusic(on) {
+    musicOn = Boolean(on); write('music', musicOn); syncAudioButtons();
     if (musicOn) startMusic(); else stopMusic();
+  }
+  $('mute').addEventListener('click', toggleMute);
+  $('settings-mute').addEventListener('click', toggleMute);
+  $('music').addEventListener('click', () => setMusic(!musicOn));
+  for (const kind of ['sfx', 'music']) $(kind + '-volume').addEventListener('input', event => {
+    const volume = clamp(Math.round(Number(event.target.value)), 0, 100);
+    if (kind === 'sfx') sfxVolume = volume; else musicVolume = volume;
+    write(kind + 'Volume', volume); syncAudioButtons();
+    if (ensureAudio()) applyAudioVolumes();
+    if (kind === 'sfx' && performance.now() - lastPreview >= 100) {
+      lastPreview = performance.now(); sound('preview');
+    }
   });
   syncAudioButtons();
 
@@ -183,13 +259,14 @@
   let held = 1, next = 1, aim = 0, heldX = 0, readyAt = 0, pointer = null;
   let mergePairs = [], effects = [], unlockQueue = [], unlockShowing = false;
   let dexReturn = 'title', dexReturnFocus, unlockReturnFocus;
+  let settingsOpen = false, settingsReturnFocus;
   const pieces = () => Composite.allBodies(engine.world).filter(body => body.plugin.level);
   const now = () => engine.timing.timestamp;
   // Spawn levels 1–3; even the largest held part fits above the warning line.
   const randomLevel = () => { const r = Math.random(); return r < .5 ? 1 : r < .82 ? 2 : 3; };
   const radiusOf = level => LEVELS[level - 1][1] * scale / 2;
   const aimY = () => dangerY - radiusOf(held) - 6 * scale;
-  const playing = () => screen === 'game' && !over && !unlockShowing && !document.hidden;
+  const playing = () => screen === 'game' && !over && !unlockShowing && !settingsOpen && !document.hidden;
   function clampAim() {
     const r = radiusOf(held); aim = clamp(aim, r + 1, width - r - 1); heldX = clamp(heldX, r + 1, width - r - 1);
   }
@@ -255,12 +332,37 @@
     $('dex-screen').hidden = screen !== 'dex';
     $('over-screen').hidden = screen !== 'over';
     $('unlock-screen').hidden = !unlockShowing;
-    $('game-screen').inert = screen !== 'game' || unlockShowing;
-    $('title-screen').inert = unlockShowing;
-    $('dex-screen').inert = unlockShowing;
-    $('over-screen').inert = unlockShowing;
+    $('settings-screen').hidden = !settingsOpen;
+    $('open-settings').setAttribute('aria-expanded', String(settingsOpen));
+    $('game-screen').inert = screen !== 'game' || unlockShowing || settingsOpen;
+    $('title-screen').inert = unlockShowing || settingsOpen;
+    $('dex-screen').inert = unlockShowing || settingsOpen;
+    $('over-screen').inert = unlockShowing || settingsOpen;
+    $('unlock-screen').inert = settingsOpen;
     pointer = null; accumulator = 0; needsRender = true;
   }
+  function openSettings() {
+    if (settingsOpen) return;
+    settingsReturnFocus = document.activeElement;
+    settingsOpen = true; syncAudioButtons(); syncScreens();
+    $('close-settings').focus({ preventScroll: true });
+  }
+  function closeSettings() {
+    if (!settingsOpen) return;
+    settingsOpen = false; syncScreens();
+    if (!unlockShowing && unlockQueue.length && screen === 'game') showNextUnlock();
+    else {
+      const fallback = unlockShowing ? $('unlock-screen').querySelector('.unlock-card')
+        : screen === 'game' ? board : screen === 'dex' ? $('back') : screen === 'over' ? $('restart') : $('start');
+      (settingsReturnFocus?.isConnected && settingsReturnFocus !== document.body && !settingsReturnFocus.closest('[hidden], [inert]')
+        ? settingsReturnFocus : fallback).focus({ preventScroll: true });
+    }
+  }
+  $('open-settings').addEventListener('click', openSettings);
+  $('close-settings').addEventListener('click', closeSettings);
+  $('settings-screen').addEventListener('click', event => {
+    if (event.target === event.currentTarget) closeSettings();
+  });
   function updateProgress() {
     $('progress').replaceChildren(...LEVELS.map((_, i) => {
       const bar = document.createElement('span'); bar.className = i < highest ? 'reached' : ''; return bar;
@@ -274,7 +376,7 @@
   }
   function preview() { $('next-piece').replaceChildren(component(next)); }
   function showNextUnlock() {
-    if (unlockShowing || !unlockQueue.length || screen !== 'game') return;
+    if (unlockShowing || settingsOpen || !unlockQueue.length || screen !== 'game') return;
     const level = unlockQueue.shift(); unlockShowing = true;
     unlockReturnFocus = document.activeElement;
     $('unlock-level').textContent = `NEW · LV.${level}`;
@@ -378,7 +480,7 @@
   function reset() {
     for (const body of pieces()) Composite.remove(engine.world, body);
     Engine.clear(engine); mergePairs = []; effects = []; score = 0; over = false; highest = 1; roundBest = best;
-    screen = 'game'; unlockShowing = false; unlockQueue = [];
+    screen = 'game'; unlockShowing = false; unlockQueue = []; settingsOpen = false;
     held = randomLevel(); next = randomLevel(); aim = heldX = width / 2; readyAt = 0;
     board.classList.remove('danger'); updateScore(); updateProgress(); preview(); clampAim(); syncScreens();
   }
@@ -387,7 +489,7 @@
     board.focus({ preventScroll: true });
   }
   function openDex() {
-    if (screen === 'dex' || unlockShowing) return;
+    if (screen === 'dex' || unlockShowing || settingsOpen) return;
     dexReturn = screen; dexReturnFocus = document.activeElement; screen = 'dex';
     $('dex-count').textContent = `${unlocked.size}/10`; $('dex-progress-fill').style.width = `${unlocked.size * 10}%`;
     $('dex-grid').replaceChildren(...LEVELS.map(([name, , fact], i) => {
@@ -435,6 +537,16 @@
     clampAim(); if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) drop();
   });
   document.addEventListener('keydown', event => {
+    if (settingsOpen) {
+      if (event.key === 'Escape') { event.preventDefault(); closeSettings(); }
+      else if (event.key === 'Tab') {
+        const controls = [...$('settings-screen').querySelectorAll('button, input')];
+        const first = controls[0], last = controls[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      }
+      return;
+    }
     if (unlockShowing && ['Escape', ' ', 'Enter'].includes(event.key)) {
       event.preventDefault(); if (!event.repeat) dismissUnlock(); return;
     }
@@ -449,12 +561,18 @@
     if ((event.ctrlKey || event.metaKey) && ['+', '-', '=', '0'].includes(event.key)) event.preventDefault();
   });
   document.addEventListener('gesturestart', event => event.preventDefault(), { passive: false });
-  document.addEventListener('touchmove', event => event.preventDefault(), { passive: false });
+  document.addEventListener('touchmove', event => {
+    if (!event.target.closest('input[type="range"]')) event.preventDefault();
+  }, { passive: false });
   document.addEventListener('wheel', event => event.preventDefault(), { passive: false });
   document.addEventListener('contextmenu', event => event.preventDefault());
   document.addEventListener('visibilitychange', () => {
     pointer = null; accumulator = 0; previousTime = performance.now();
-    if (document.hidden) stopMusic(); else { if (musicOn && audio) startMusic(); needsRender = true; }
+    if (document.hidden) stopMusic();
+    else {
+      if (audio) { ensureAudio(); if (musicOn) startMusic(); }
+      needsRender = true;
+    }
   });
 
   function bloomSurface() {
@@ -568,7 +686,11 @@
   }))).then(() => { prepareSprites(); paintBackground(); needsRender = true; });
   window.__game = {
     spawn(level, x, y) { const body = spawn(level, x, y); return { level: body.plugin.level, x: body.position.x, y: body.position.y }; },
-    state() { return { score, best, bodies: pieces().map(body => ({ level: body.plugin.level, x: body.position.x, y: body.position.y })), over, screen, unlockShowing }; },
+    state() { return { score, best, bodies: pieces().map(body => ({ level: body.plugin.level, x: body.position.x, y: body.position.y })), over, screen, unlockShowing, settingsOpen, sfxVolume, musicVolume }; },
+    sfx: sound,
+    setMusic,
+    openSettings,
+    closeSettings,
     forceGameOver: gameOver,
     reset,
     start,
