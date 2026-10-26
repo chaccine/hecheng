@@ -65,8 +65,14 @@
       </div>
       <canvas id="effects" aria-hidden="true"></canvas>
       <footer class="footer">
-        <div id="progress" class="progress" aria-label="合成进度"></div>
-        <div id="hint" class="label">合成进度 1/10 · 点击屏幕落下元件</div>
+        <button id="clear-screen" class="clear-button" disabled aria-label="清屏，已充能，棋盘为空" aria-describedby="clear-status">
+          <span class="charge-ring" aria-hidden="true"><svg viewBox="0 0 44 44"><circle class="charge-track" cx="22" cy="22" r="19"/><circle id="clear-ring" class="charge-fill" cx="22" cy="22" r="19" pathLength="1"/></svg><span>✧</span></span>
+          <span class="clear-copy"><span>清屏</span><span id="clear-status">已充能</span></span>
+        </button>
+        <div class="footer-progress">
+          <div id="progress" class="progress" aria-label="合成进度"></div>
+          <div id="hint" class="label">合成进度 1/10 · 点击屏幕落下元件</div>
+        </div>
       </footer>
     </section>
 
@@ -79,6 +85,8 @@
       <div class="dex-progress"><div id="dex-progress-fill"></div></div>
       <div id="dex-grid" class="dex-grid"></div>
     </section>
+
+    <div id="cpu-flash" aria-hidden="true" hidden></div>
 
     <div id="settings-screen" class="overlay settings-overlay" hidden>
       <section class="modal glass settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1">
@@ -111,9 +119,13 @@
           <div><div class="label">本局</div><div id="round-score" class="number">0</div></div>
           <div><div class="label">最高</div><div id="round-best" class="number accent">0</div><div id="new-record">新纪录</div></div>
         </div>
+        <dl class="round-stats">
+          <div><dt>合成次数</dt><dd id="round-merges" class="number">0</dd></div>
+          <div><dt>最高连击</dt><dd id="round-combo" class="number">×0</dd></div>
+        </dl>
         <div class="round-part">
           <div id="round-piece"></div>
-          <div><div class="label accent">本局最高</div><h2 id="round-part-name">电阻</h2><p id="round-part-fact">阻碍电流，单位欧姆 Ω</p></div>
+          <div><div class="label accent">最高元件</div><h2 id="round-part-name">电阻</h2><p id="round-part-fact">阻碍电流，单位欧姆 Ω</p></div>
         </div>
         <button id="restart" class="button primary">再来一局</button>
         <button id="over-dex" class="button secondary">元件图鉴</button>

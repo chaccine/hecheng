@@ -11,7 +11,8 @@
   const bg = bgCanvas.getContext('2d'), dustCtx = dustCanvas.getContext('2d');
   const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
   const format = n => n.toLocaleString('en-US');
-  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)');
+  let reducedMotion = motionPreference.matches;
   // These three existing save formats remain compatible with version 1.
   const read = (key, fallback) => {
     try { const value = localStorage.getItem('hecheng-' + key); return value === null ? fallback : JSON.parse(value); }
@@ -40,9 +41,25 @@
 
   // Independent volume buses share a master and a gentle limiter, with headroom
   // for overlapping chimes. Never create a context before a user gesture.
-  let audio, sfxBus, musicBus, master, compressor, musicTimer, musicStep = 0, musicNext = 0;
+  let audio, sfxBus, musicBus, musicDrive, musicFilter, master, compressor, musicTimer, musicStep = 0, musicNext = 0;
+  let musicIntensity = 0;
   let audioGesture = false, audioUnlocked = false, lastPreview = -Infinity;
   const musicVoices = new Set(), sfxVoices = new Set();
+  const SFX_CAP = 36, CPU_VOICES = 15;
+  const PENTATONIC = [0, 2, 4, 7, 9];
+  const scaleNote = (step, root = 329.63) => {
+    step = clamp(Math.floor(step), 0, 14);
+    return root * 2 ** ((PENTATONIC[step % 5] + 12 * Math.floor(step / 5)) / 12);
+  };
+  function intensifyMusic(value) {
+    musicIntensity = clamp(value, 0, 1);
+    if (!audio) return;
+    const t = audio.currentTime, ramp = musicIntensity ? .18 : .8;
+    musicDrive.gain.cancelScheduledValues(t);
+    musicDrive.gain.setTargetAtTime(1 + musicIntensity * .2, t, ramp);
+    musicFilter.frequency.cancelScheduledValues(t);
+    musicFilter.frequency.setTargetAtTime(1350 + musicIntensity * 2850, t, ramp);
+  }
   function applyAudioVolumes(timeConstant = .025) {
     if (!audio) return;
     const t = audio.currentTime;
@@ -64,7 +81,11 @@
         compressor.attack.value = .003; compressor.release.value = .2;
         master.connect(compressor); compressor.connect(audio.destination);
         sfxBus = audio.createGain(); sfxBus.gain.value = muted ? 0 : sfxVolume / 100; sfxBus.connect(master);
-        musicBus = audio.createGain(); musicBus.gain.value = 0; musicBus.connect(master);
+        musicBus = audio.createGain(); musicBus.gain.value = 0;
+        musicDrive = audio.createGain(); musicDrive.gain.value = 1 + musicIntensity * .2;
+        musicFilter = audio.createBiquadFilter(); musicFilter.type = 'lowpass';
+        musicFilter.frequency.value = 1350 + musicIntensity * 2850; musicFilter.Q.value = .5;
+        musicBus.connect(musicDrive); musicDrive.connect(musicFilter); musicFilter.connect(master);
       }
       if (audio.state === 'suspended' || audio.state === 'interrupted') audio.resume().catch(() => {});
       return true;
@@ -100,20 +121,38 @@
     voices.add(oscillator);
     oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); voices.delete(oscillator); };
   }
-  function sound(kind, level = 1) {
+  function sound(kind, level = 1, detail = 1) {
     if (muted || sfxVolume === 0 || !ensureAudio()) return;
     try {
       level = clamp(Number(level) || 1, 1, 10);
       const t = audio.currentTime + .008;
+      // Keep room for the climax even in a dense merge/clear cascade.
+      const voiceLimit = kind === 'cpu' ? SFX_CAP : SFX_CAP - CPU_VOICES;
+      if (kind === 'impact') {
+        if (sfxVoices.size + 2 > voiceLimit) return;
+        const frequency = 860 / (1 + (level - 1) * .42);
+        const strength = clamp(detail / 9, .2, 1), duration = .065 + level * .009;
+        tone(sfxBus, frequency, t, duration, .045 * strength, level < 5 ? 'triangle' : 'sine', .002);
+        tone(sfxBus, frequency * 2.4, t, duration * .42, .018 * strength, 'sine', .001);
+        return;
+      }
+      if (kind === 'clear') {
+        if (sfxVoices.size + 2 > voiceLimit) return;
+        const frequency = scaleNote(detail, 261.63);
+        tone(sfxBus, frequency, t, .16, .09, 'sine', .003);
+        tone(sfxBus, frequency * 2, t, .075, .026, 'triangle', .002);
+        return;
+      }
       const notes = kind === 'unlock' ? [523.25, 659.25, 783.99, 1046.5]
         : kind === 'over' ? [783.99, 659.25, 523.25]
-          : kind === 'merge' ? [523.25 * 2 ** (level / 12), 783.99 * 2 ** (level / 12)] : [587.33];
-      const duration = kind === 'drop' ? .24 : kind === 'preview' ? .3 : .62;
+          : kind === 'cpu' ? [523.25, 659.25, 783.99, 1046.5, 1567.98]
+            : kind === 'merge' ? [scaleNote(detail - 1)] : [587.33];
+      const duration = kind === 'drop' ? .24 : kind === 'preview' ? .3 : kind === 'cpu' ? .85 : .48;
       const volume = kind === 'drop' || kind === 'preview' ? .085 : .115;
       notes.forEach((frequency, i) => {
         // Bound dense merge cascades; each soft chime has a fundamental,
         // a fifth and an octave, concentrated in phone-friendly midrange.
-        if (sfxVoices.size + 3 > 36) return;
+        if (sfxVoices.size + 3 > voiceLimit) return;
         const start = t + i * .09;
         tone(sfxBus, frequency, start, duration, volume, 'sine', .018);
         tone(sfxBus, frequency * 1.5, start, duration * .75, volume * .28, 'sine', .025);
@@ -242,10 +281,12 @@
       sprites.set(level, surface);
     }
   }
-  function discOn(c, level, x, y, diameter, angle = 0, alpha = 1) {
+  function discOn(c, level, x, y, diameter, angle = 0, alpha = 1, stretch = 0, stretchAngle = 0) {
     const surface = sprites.get(level); if (!surface) return;
     const size = diameter * 1.28;
-    c.save(); c.translate(x, y); c.rotate(angle); c.globalAlpha = alpha;
+    c.save(); c.translate(x, y); c.rotate(stretchAngle);
+    // Only pixels stretch: the Matter circle and its contacts never change.
+    c.scale(1 / (1 + stretch), 1 + stretch); c.rotate(angle - stretchAngle); c.globalAlpha = alpha;
     c.drawImage(surface, -size / 2, -size / 2, size, size); c.restore();
   }
   $('title-cpu').append(component(10)); $('title-mcu').append(component(8));
@@ -258,6 +299,13 @@
   let score = 0, over = false, screen = 'title', highest = 1, roundBest = best;
   let held = 1, next = 1, aim = 0, heldX = 0, readyAt = 0, pointer = null;
   let mergePairs = [], effects = [], unlockQueue = [], unlockShowing = false;
+  const COMBO_WINDOW = 1200, CLEAR_MERGES = 15, MAX_EFFECTS = 8, MAX_SPARKS = 6;
+  let combo = 0, maxCombo = 0, merges = 0, comboUntil = 0;
+  let feedbackTime = 0, roundTime = 0, hitStopUntil = 0;
+  let shakeUntil = 0, shakePower = 0, shakeX = 0, shakeY = 0, heldSway = 0;
+  let cpuFlashAt = -Infinity, lastImpactSound = -Infinity;
+  let clearProgress = CLEAR_MERGES, clearing = false, clearQueue = [], clearElapsed = 0, clearIndex = 0;
+  let comboLabel = null;
   let dexReturn = 'title', dexReturnFocus, unlockReturnFocus;
   let settingsOpen = false, settingsReturnFocus;
   const pieces = () => Composite.allBodies(engine.world).filter(body => body.plugin.level);
@@ -266,7 +314,13 @@
   const randomLevel = () => { const r = Math.random(); return r < .5 ? 1 : r < .82 ? 2 : 3; };
   const radiusOf = level => LEVELS[level - 1][1] * scale / 2;
   const aimY = () => dangerY - radiusOf(held) - 6 * scale;
-  const playing = () => screen === 'game' && !over && !unlockShowing && !settingsOpen && !document.hidden;
+  const roundActive = () => screen === 'game' && !over && !unlockShowing && !settingsOpen && !document.hidden;
+  const playing = () => roundActive() && !clearing;
+  const clearReady = () => clearProgress >= CLEAR_MERGES;
+  motionPreference.addEventListener?.('change', event => {
+    reducedMotion = event.matches; shakeX = shakeY = heldSway = 0;
+    shakeUntil = 0; lastDust = 0; needsRender = true;
+  });
   function clampAim() {
     const r = radiusOf(held); aim = clamp(aim, r + 1, width - r - 1); heldX = clamp(heldX, r + 1, width - r - 1);
   }
@@ -339,10 +393,10 @@
     $('dex-screen').inert = unlockShowing || settingsOpen;
     $('over-screen').inert = unlockShowing || settingsOpen;
     $('unlock-screen').inert = settingsOpen;
-    pointer = null; accumulator = 0; needsRender = true;
+    pointer = null; accumulator = 0; needsRender = true; updateClearUI();
   }
   function openSettings() {
-    if (settingsOpen) return;
+    if (settingsOpen || clearing) return;
     settingsReturnFocus = document.activeElement;
     settingsOpen = true; syncAudioButtons(); syncScreens();
     $('close-settings').focus({ preventScroll: true });
@@ -374,6 +428,22 @@
   function updateScore() {
     $('score').textContent = format(score); $('best').textContent = format(best); $('title-best').textContent = format(best);
   }
+  function award(points) {
+    score += points;
+    if (score > best) { best = score; write('best', best); }
+    updateScore();
+  }
+  function updateClearUI() {
+    const button = $('clear-screen'), empty = pieces().length === 0;
+    const charged = clearReady(), count = Math.floor(clearProgress);
+    button.disabled = !playing() || !charged || empty;
+    button.dataset.ready = String(charged);
+    $('clear-ring').style.strokeDashoffset = String(1 - clearProgress / CLEAR_MERGES);
+    $('clear-status').textContent = clearing ? '释放中…' : charged ? '已充能' : `${count}/${CLEAR_MERGES} 次合成`;
+    button.setAttribute('aria-label', clearing ? '清屏，释放中' : charged ? `清屏，已充能${empty ? '，棋盘为空' : ''}` : `清屏，还需 ${Math.ceil(CLEAR_MERGES - clearProgress)} 次合成`);
+    board.setAttribute('aria-busy', String(clearing));
+    $('open-settings').disabled = clearing; $('open-dex').disabled = clearing;
+  }
   function preview() { $('next-piece').replaceChildren(component(next)); }
   function showNextUnlock() {
     if (unlockShowing || settingsOpen || !unlockQueue.length || screen !== 'game') return;
@@ -385,7 +455,7 @@
     $('unlock-fact').textContent = LEVELS[level - 1][2];
     $('unlock-number').textContent = `No.${String(level).padStart(2, '0')} / 10`;
     syncScreens(); $('unlock-screen').querySelector('.unlock-card').focus({ preventScroll: true });
-    haptic([12, 65, 20]); sound('unlock', level);
+    haptic([12, 65, 20]); if (level < 10) sound('unlock', level);
   }
   function dismissUnlock() {
     if (!unlockShowing) return;
@@ -407,24 +477,63 @@
     x = Number.isFinite(x) ? x : width / 2; y = Number.isFinite(y) ? y : height / 3;
     const body = Bodies.circle(clamp(x, r, width - r), clamp(y, r, height - r), r, {
       restitution: .16, friction: .28, frictionStatic: .65, frictionAir: .012, density: .002, sleepThreshold: 75,
-      plugin: { level, born: now(), popAt: merged ? now() : null, settled: false, dangerSince: null }
+      plugin: { level, born: now(), popAt: merged ? feedbackTime : null, settled: false, dangerSince: null,
+        stretch: 0, springVelocity: merged ? -1.5 : 0, stretchAngle: 0, impactAt: -Infinity, soundAt: -Infinity }
     }, 40);
-    Composite.add(engine.world, body); unlock(level); needsRender = true; return body;
+    Composite.add(engine.world, body); unlock(level); updateClearUI(); needsRender = true; return body;
   }
   function drop() {
     if (!playing() || now() < readyAt) return;
     clampAim(); heldX = aim; haptic(8); sound('drop');
     const body = spawn(held, heldX, aimY()); Body.setVelocity(body, { x: 0, y: 1.05 });
+    body.plugin.stretch = reducedMotion ? 0 : .13; body.plugin.springVelocity = .8;
     held = next; next = randomLevel(); readyAt = now() + 380; clampAim(); preview(); needsRender = true;
   }
   function queueMerges(event) {
+    if (clearing || over) return;
     for (const pair of event.pairs) {
       const a = pair.bodyA, b = pair.bodyB;
       if (!a.plugin.level || a.plugin.level !== b.plugin.level) continue;
       mergePairs.push({ a, b });
     }
   }
-  Events.on(engine, 'collisionStart', queueMerges); Events.on(engine, 'collisionActive', queueMerges);
+  function impact(event) {
+    let loudest = null;
+    for (const pair of event.pairs) {
+      const a = pair.bodyA, b = pair.bodyB, normal = pair.collision.normal;
+      const speed = Math.abs((a.velocity.x - b.velocity.x) * normal.x + (a.velocity.y - b.velocity.y) * normal.y) / scale;
+      if (speed < 1.65 || (a.plugin.level && a.plugin.level === b.plugin.level)) continue;
+      for (const body of [a, b]) {
+        const meta = body.plugin;
+        if (!meta.level) continue;
+        if (!reducedMotion && now() - meta.impactAt > 90) {
+          meta.springVelocity = -clamp(speed * .8, 1.5, 5.5);
+          meta.stretchAngle = Math.atan2(normal.y, normal.x) - Math.PI / 2; meta.impactAt = now();
+        }
+        if (now() - meta.soundAt > 200 && (!loudest || speed > loudest.speed)) loudest = { body, speed };
+      }
+    }
+    if (loudest && now() - lastImpactSound >= 75) {
+      lastImpactSound = now(); loudest.body.plugin.soundAt = now();
+      sound('impact', loudest.body.plugin.level, loudest.speed);
+    }
+  }
+  Events.on(engine, 'collisionStart', event => { impact(event); queueMerges(event); });
+  Events.on(engine, 'collisionActive', queueMerges);
+  function addEffect(x, y, level, points, name) {
+    // A shared cap bounds merge AND clear cascades to 8 blooms / 48 specks.
+    if (effects.length >= MAX_EFFECTS) effects.shift();
+    effects.push({ x, y, radius: radiusOf(level), born: feedbackTime, points, name,
+      sparks: Array.from({ length: MAX_SPARKS }, (_, i) => ({ angle: i * Math.PI * 2 / MAX_SPARKS + Math.random() * .4,
+        distance: 9 + Math.random() * 14, drift: (Math.random() - .5) * .5 })) });
+  }
+  function endCombo() {
+    combo = 0; comboUntil = 0; comboLabel = null; intensifyMusic(0);
+  }
+  function celebrateCPU() {
+    cpuFlashAt = feedbackTime; needsRender = true;
+    sound('cpu', 10); haptic([28, 35, 16, 35, 40]);
+  }
   function merge() {
     const used = new Set(), present = new Set(pieces());
     for (const { a, b } of mergePairs) {
@@ -433,27 +542,73 @@
       const level = a.plugin.level, target = Math.min(10, level + 1);
       const x = (a.position.x + b.position.x) / 2, y = (a.position.y + b.position.y) / 2;
       Composite.remove(engine.world, a); Composite.remove(engine.world, b);
-      haptic(15);
+      combo = roundTime <= comboUntil && combo > 0 ? combo + 1 : 1;
+      comboUntil = roundTime + COMBO_WINDOW; maxCombo = Math.max(maxCombo, combo); merges++;
+      clearProgress = Math.min(CLEAR_MERGES, clearProgress + 1);
+      const multiplier = Math.min(3, 1 + .25 * (combo - 1));
+      intensifyMusic(Math.min(1, (combo - 1) / 6));
+      hitStopUntil = Math.max(hitStopUntil, feedbackTime + 40 + target * 5);
+      if (!reducedMotion) {
+        shakePower = Math.min(2.5 * scale, (.45 + target * .19) * scale);
+        shakeUntil = feedbackTime + 170;
+      }
       if (level < 10) {
         const body = spawn(target, x, y, true);
         Body.setVelocity(body, { x: clamp((a.velocity.x + b.velocity.x) * .22, -1.8, 1.8), y: clamp((a.velocity.y + b.velocity.y) * .2, -.8, .8) });
         Body.setAngularVelocity(body, clamp((a.angularVelocity + b.angularVelocity) * .2, -.06, .06));
       }
-      const points = level === 10 ? 2048 : 2 ** level;
-      score += points;
-      if (score > best) { best = score; write('best', best); }
-      // At most 8 rings / 32 light specks, with no DOM allocation per frame.
-      if (effects.length >= 8) effects.shift();
-      effects.push({ x, y, radius: radiusOf(target), born: now(), points,
-        name: level === 10 ? 'CPU ×2' : LEVELS[target - 1][0],
-        sparks: Array.from({ length: 4 }, (_, i) => ({ angle: i * Math.PI / 2 + Math.random() * .4, distance: 9 + Math.random() * 14, drift: (Math.random() - .5) * .5 })) });
-      if (!unlockShowing) sound('merge', target);
-      updateScore();
+      haptic(target < 5 ? 8 + target * 3 : [12 + target * 2, 24, 5 + target]);
+      const points = Math.round((level === 10 ? 2048 : 2 ** level) * multiplier);
+      award(points);
+      addEffect(x, y, target, points, level === 10 ? 'CPU ×2' : LEVELS[target - 1][0]);
+      if (combo >= 2) comboLabel = { x, y: Math.max(28 * scale, y - radiusOf(target) - 45 * scale),
+        born: feedbackTime, combo, multiplier };
+      if (target === 10 && level < 10) celebrateCPU();
+      else sound('merge', target, combo);
+      updateClearUI();
       // A discovery freezes the world at this exact simulation step.
       if (unlockShowing) break;
     }
     mergePairs = [];
   }
+  function clearScreen() {
+    if (!playing() || !clearReady()) return false;
+    const bodies = pieces();
+    if (!bodies.length) return false;
+    // Distance from bottom-center defines the ripple; rank keeps pops sequential.
+    const ordered = bodies.map(body => ({ body, distance: Math.hypot(body.position.x - width / 2, height - body.position.y) }))
+      .sort((a, b) => a.distance - b.distance || a.body.id - b.body.id);
+    const first = ordered[0].distance, span = Math.max(1, ordered[ordered.length - 1].distance - first);
+    const spacing = Math.min(65, 1100 / Math.max(1, ordered.length - 1));
+    clearQueue = ordered.map((entry, i) => ({ body: entry.body, at: i * spacing + (entry.distance - first) / span * 300 }));
+    clearing = true; clearProgress = 0; clearElapsed = 0; clearIndex = 0;
+    if (pointer !== null && board.hasPointerCapture(pointer)) board.releasePointerCapture(pointer);
+    pointer = null; heldSway = 0; mergePairs = []; accumulator = 0; hitStopUntil = 0;
+    endCombo(); board.classList.remove('danger'); updateClearUI(); needsRender = true;
+    return true;
+  }
+  function tickClear(delta) {
+    clearElapsed += delta;
+    while (clearQueue.length && clearQueue[0].at <= clearElapsed) {
+      const { body } = clearQueue.shift(), level = body.plugin.level;
+      const points = 2 ** (level - 1);
+      Composite.remove(engine.world, body);
+      addEffect(body.position.x, body.position.y, level, points, '');
+      award(points); sound('clear', level, clearIndex++); haptic(6);
+    }
+    if (!clearQueue.length && clearElapsed >= 250) {
+      clearing = false; Engine.clear(engine); mergePairs = [];
+      readyAt = now() + 160; updateClearUI();
+      board.focus({ preventScroll: true });
+    }
+    needsRender = true;
+  }
+  function setClearCharge(value) {
+    value = Number(value);
+    clearProgress = (Number.isFinite(value) ? clamp(value, 0, 1) : 0) * CLEAR_MERGES;
+    updateClearUI(); return clearProgress / CLEAR_MERGES;
+  }
+  $('clear-screen').addEventListener('click', clearScreen);
   function danger() {
     let warning = false;
     for (const body of pieces()) {
@@ -470,9 +625,11 @@
   function gameOver() {
     if (over) return;
     over = true; screen = 'over'; unlockShowing = false; unlockQueue = [];
+    clearing = false; clearQueue = []; endCombo(); hitStopUntil = 0;
     board.classList.remove('danger');
     $('round-score').textContent = format(score); $('round-best').textContent = format(best);
     $('new-record').style.visibility = score > roundBest ? 'visible' : 'hidden';
+    $('round-merges').textContent = format(merges); $('round-combo').textContent = `×${maxCombo}`;
     $('round-piece').replaceChildren(component(highest));
     $('round-part-name').textContent = LEVELS[highest - 1][0]; $('round-part-fact').textContent = LEVELS[highest - 1][2];
     syncScreens(); $('restart').focus({ preventScroll: true }); sound('over');
@@ -480,6 +637,10 @@
   function reset() {
     for (const body of pieces()) Composite.remove(engine.world, body);
     Engine.clear(engine); mergePairs = []; effects = []; score = 0; over = false; highest = 1; roundBest = best;
+    combo = maxCombo = merges = roundTime = comboUntil = 0; comboLabel = null; intensifyMusic(0);
+    clearing = false; clearQueue = []; clearElapsed = clearIndex = 0; clearProgress = CLEAR_MERGES;
+    hitStopUntil = shakeUntil = shakePower = shakeX = shakeY = heldSway = 0;
+    cpuFlashAt = lastImpactSound = -Infinity; $('cpu-flash').hidden = true;
     screen = 'game'; unlockShowing = false; unlockQueue = []; settingsOpen = false;
     held = randomLevel(); next = randomLevel(); aim = heldX = width / 2; readyAt = 0;
     board.classList.remove('danger'); updateScore(); updateProgress(); preview(); clampAim(); syncScreens();
@@ -489,7 +650,7 @@
     board.focus({ preventScroll: true });
   }
   function openDex() {
-    if (screen === 'dex' || unlockShowing || settingsOpen) return;
+    if (screen === 'dex' || unlockShowing || settingsOpen || clearing) return;
     dexReturn = screen; dexReturnFocus = document.activeElement; screen = 'dex';
     $('dex-count').textContent = `${unlocked.size}/10`; $('dex-progress-fill').style.width = `${unlocked.size * 10}%`;
     $('dex-grid').replaceChildren(...LEVELS.map(([name, , fact], i) => {
@@ -585,10 +746,34 @@
     return surface;
   }
   const bloom = bloomSurface();
+  function animateFeedback(delta) {
+    const dt = Math.min(delta, 32) / 1000;
+    for (const body of pieces()) {
+      const meta = body.plugin;
+      if (reducedMotion) { meta.stretch = meta.springVelocity = 0; continue; }
+      // A damped spring, integrated in small visual steps, independent of physics.
+      const steps = Math.max(1, Math.ceil(dt / .008)), step = dt / steps;
+      for (let i = 0; i < steps; i++) {
+        meta.springVelocity += (-210 * meta.stretch - 17 * meta.springVelocity) * step;
+        meta.stretch = clamp(meta.stretch + meta.springVelocity * step, -.2, .2);
+      }
+      if (Math.abs(meta.stretch) + Math.abs(meta.springVelocity) < .001) meta.stretch = meta.springVelocity = 0;
+    }
+    const shakeLeft = Math.max(0, shakeUntil - feedbackTime) / 170;
+    shakeX = reducedMotion ? 0 : Math.sin(feedbackTime * .082) * shakePower * shakeLeft ** 2;
+    shakeY = reducedMotion ? 0 : Math.cos(feedbackTime * .097) * shakePower * .65 * shakeLeft ** 2;
+    const age = feedbackTime - cpuFlashAt, flash = $('cpu-flash');
+    if (age < 1200) {
+      const rise = reducedMotion ? 250 : 110;
+      const opacity = age < rise ? age / rise : Math.max(0, 1 - (age - rise) / (1200 - rise)) ** 2;
+      flash.hidden = false; flash.style.opacity = String(opacity * (reducedMotion ? .12 : .32));
+    } else flash.hidden = true;
+  }
   function renderBoard() {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, width, height);
+    ctx.save(); ctx.translate(shakeX, shakeY);
     const bodies = pieces();
-    if (!over) {
+    if (!over && !clearing) {
       const r = radiusOf(held);
       let landing = height - r;
       for (const body of bodies) {
@@ -607,19 +792,22 @@
     }
     for (const body of bodies) {
       let pop = 1;
-      const elapsed = body.plugin.popAt === null ? 1000 : now() - body.plugin.popAt;
+      const elapsed = body.plugin.popAt === null ? 1000 : feedbackTime - body.plugin.popAt;
       if (!reducedMotion && elapsed < 320) pop += .09 * Math.sin(Math.PI * elapsed / 320) * (1 - elapsed / 400);
-      discOn(ctx, body.plugin.level, body.position.x, body.position.y, radiusOf(body.plugin.level) * 2 * pop, body.angle);
+      discOn(ctx, body.plugin.level, body.position.x, body.position.y, radiusOf(body.plugin.level) * 2 * pop, body.angle,
+        1, reducedMotion ? 0 : body.plugin.stretch, body.plugin.stretchAngle);
     }
-    if (!over) discOn(ctx, held, heldX, aimY(), radiusOf(held) * 2, 0, now() < readyAt ? .48 : 1);
+    if (!over && !clearing) discOn(ctx, held, heldX, aimY(), radiusOf(held) * 2, heldSway, now() < readyAt ? .48 : 1,
+      reducedMotion ? 0 : Math.abs(heldSway) * .22);
+    ctx.restore();
   }
   function renderEffects() {
     fx.setTransform(dpr, 0, 0, dpr, 0, 0); fx.clearRect(0, 0, appWidth, appHeight);
     // This sibling canvas spans the whole app, so the board never crops a bloom.
-    fx.save(); fx.translate(boardX, boardY);
-    effects = effects.filter(effect => now() - effect.born < 1350);
+    fx.save(); fx.translate(boardX + shakeX, boardY + shakeY);
+    effects = effects.filter(effect => feedbackTime - effect.born < 1350);
     for (const effect of effects) {
-      const t = clamp((now() - effect.born) / 1350, 0, 1), alpha = (1 - t) ** 1.4;
+      const t = clamp((feedbackTime - effect.born) / 1350, 0, 1), alpha = (1 - t) ** 1.4;
       const radius = effect.radius * (1.06 + (reducedMotion ? 0 : .26 * t)) + 7 * scale;
       const size = radius * 3.2;
       fx.globalAlpha = alpha;
@@ -631,9 +819,27 @@
         fx.drawImage(glow, x - s / 2, y - s / 2, s, s);
       }
       fx.fillStyle = '#ffe6c2'; fx.font = `500 ${13 * scale}px sans-serif`; fx.textAlign = 'center';
-      const text = `+${effect.points} ${effect.name}`, half = fx.measureText(text).width / 2;
+      const text = `+${effect.points}${effect.name ? ' ' + effect.name : ''}`, half = fx.measureText(text).width / 2;
       const textX = clamp(effect.x, half + 2, width - half - 2);
       fx.fillText(text, textX, effect.y - effect.radius - (13 + (reducedMotion ? 0 : 13 * t)) * scale);
+    }
+    if (comboLabel) {
+      const age = feedbackTime - comboLabel.born;
+      if (age < 1000) {
+        const pop = reducedMotion ? 1 : 1 + .13 * Math.sin(Math.min(1, age / 220) * Math.PI);
+        const text = `Combo ×${comboLabel.combo}  ·  ${comboLabel.multiplier.toFixed(2).replace(/\.?0+$/, '')}倍`;
+        fx.save(); fx.font = `500 ${13 * scale}px sans-serif`; fx.textAlign = 'center';
+        const half = fx.measureText(text).width / 2 + 11 * scale;
+        const x = clamp(comboLabel.x, half * 1.14 + 2, width - half * 1.14 - 2);
+        fx.translate(x, comboLabel.y - (reducedMotion ? 0 : 8 * scale * Math.min(1, age / 1000)));
+        fx.scale(pop, pop); fx.globalAlpha = Math.min(1, (1000 - age) / 250);
+        fx.fillStyle = '#30251ee8'; fx.strokeStyle = '#e0b47a80'; fx.lineWidth = .8 * scale;
+        fx.beginPath();
+        if (fx.roundRect) fx.roundRect(-half, -13 * scale, half * 2, 26 * scale, 13 * scale);
+        else fx.rect(-half, -13 * scale, half * 2, 26 * scale);
+        fx.fill(); fx.stroke();
+        fx.fillStyle = '#edc792'; fx.fillText(text, 0, 4 * scale); fx.restore();
+      }
     }
     fx.restore();
   }
@@ -657,18 +863,37 @@
       fpsFrames++;
       if (time - fpsStart >= 700) { currentFps = Math.round(fpsFrames * 1000 / (time - fpsStart)); fpsFrames = 0; fpsStart = time; }
     } else { fpsStart = time; fpsFrames = 0; }
-    if (playing()) {
-      heldX += (aim - heldX) * (reducedMotion ? 1 : 1 - Math.exp(-delta / 48)); clampAim();
-      accumulator += delta;
-      let steps = 0;
-      while (accumulator >= 1000 / 60 && steps++ < 5) {
-        Engine.update(engine, 1000 / 60); merge();
-        if (!unlockShowing) danger();
-        accumulator -= 1000 / 60;
-        if (!playing()) { accumulator = 0; break; }
+    const feedbackVisible = !document.hidden && !settingsOpen &&
+      (screen === 'game' || screen === 'over' || feedbackTime - cpuFlashAt < 1200);
+    if (feedbackVisible) feedbackTime += delta;
+    if (roundActive()) {
+      roundTime += delta;
+      if (combo && roundTime > comboUntil) endCombo();
+      if (clearing) { accumulator = 0; tickClear(delta); }
+      else {
+        const oldX = heldX;
+        heldX += (aim - heldX) * (reducedMotion ? 1 : 1 - Math.exp(-delta / 48)); clampAim();
+        const swayTarget = reducedMotion ? 0 : clamp((heldX - oldX) / Math.max(1, delta) / scale * .12, -.13, .13);
+        heldSway += (swayTarget - heldSway) * (1 - Math.exp(-delta / 65));
+        // Discard paused time so a hit-stop never produces a catch-up jump.
+        if (feedbackTime < hitStopUntil) accumulator = 0;
+        else {
+          accumulator += delta;
+          let steps = 0;
+          while (accumulator >= 1000 / 60 && steps++ < 5) {
+            Engine.update(engine, 1000 / 60); merge();
+            if (!unlockShowing) danger();
+            accumulator -= 1000 / 60;
+            if (!playing() || feedbackTime < hitStopUntil) { accumulator = 0; break; }
+          }
+        }
       }
       needsRender = true;
     } else accumulator = 0;
+    if (feedbackVisible) {
+      animateFeedback(delta);
+      if (effects.length || feedbackTime < shakeUntil || feedbackTime - cpuFlashAt < 1250) needsRender = true;
+    }
     if ((screen === 'game' || screen === 'over') && needsRender && !document.hidden) {
       renderBoard(); renderEffects(); needsRender = false;
     }
@@ -686,7 +911,12 @@
   }))).then(() => { prepareSprites(); paintBackground(); needsRender = true; });
   window.__game = {
     spawn(level, x, y) { const body = spawn(level, x, y); return { level: body.plugin.level, x: body.position.x, y: body.position.y }; },
-    state() { return { score, best, bodies: pieces().map(body => ({ level: body.plugin.level, x: body.position.x, y: body.position.y })), over, screen, unlockShowing, settingsOpen, sfxVolume, musicVolume }; },
+    state() { return { score, best, bodies: pieces().map(body => ({ level: body.plugin.level, x: body.position.x, y: body.position.y })),
+      over, screen, unlockShowing, settingsOpen, sfxVolume, musicVolume,
+      combo, maxCombo, merges, clearCharge: clearProgress / CLEAR_MERGES, clearReady: clearReady(), clearing, topLevel: highest }; },
+    clearScreen,
+    setClearCharge,
+    forceCPU: celebrateCPU,
     sfx: sound,
     setMusic,
     openSettings,
