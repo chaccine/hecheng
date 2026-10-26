@@ -3,18 +3,39 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-  <meta name="theme-color" content="#15181b">
+  <meta name="theme-color" content="#29231e">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="description" content="从电阻到 CPU，合成你的元件宇宙。">
+  <meta name="description" content="从一颗电阻，到一枚 CPU。元件合成 2.0。">
   <link rel="icon" href="data:,">
-  <title>元件合成</title>
+  <title>元件合成 2.0</title>
   <link rel="stylesheet" href="style.css">
   <script defer src="vendor/matter.min.js"></script>
   <script defer src="game.js"></script>
 </head>
 <body>
   <main id="app" aria-label="元件合成">
-    <section id="game-screen" aria-label="合成游戏">
+    <canvas id="background-parts" aria-hidden="true"></canvas>
+    <canvas id="dust" aria-hidden="true"></canvas>
+
+    <section id="title-screen" aria-label="元件合成，开始游戏">
+      <div id="title-art" aria-hidden="true">
+        <div id="title-cpu" class="title-part"></div>
+        <div id="title-mcu" class="title-part"></div>
+        <div id="title-bjt" class="title-part"></div>
+        <div id="title-cap" class="title-part"></div>
+      </div>
+      <div class="title-copy">
+        <h1>元件合成</h1>
+        <p class="label">从一颗电阻，到一枚 CPU</p>
+      </div>
+      <div class="title-actions">
+        <button id="start" class="button primary">开始</button>
+        <button id="title-dex" class="button secondary">元件图鉴 <span id="title-count" class="number">1/10</span></button>
+      </div>
+      <p class="title-best label">最高分 <span id="title-best" class="number accent">0</span></p>
+    </section>
+
+    <section id="game-screen" aria-label="合成游戏" hidden>
       <header class="hud">
         <div class="scores">
           <div class="label">分数</div>
@@ -26,8 +47,15 @@
           <div id="next-piece" class="next-piece"></div>
         </div>
         <div class="tools">
-          <button id="mute" class="button secondary icon-button" aria-label="关闭声音" aria-pressed="false" title="关闭声音">♪</button>
-          <button id="open-dex" class="button secondary icon-button dex-button" aria-label="元件图鉴" title="元件图鉴">图鉴</button>
+          <button id="mute" class="button secondary icon-button" aria-label="关闭音效" aria-pressed="false" title="关闭音效">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 4 6 8H3v8h3l5 4Z"/><g class="sound-on"><path d="M15 8a6 6 0 0 1 0 8M18 5a10 10 0 0 1 0 14"/></g><g class="sound-off"><path d="m16 9 6 6m0-6-6 6"/></g></svg>
+          </button>
+          <button id="music" class="button secondary icon-button" aria-label="开启背景音乐" aria-pressed="false" title="开启背景音乐">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 17V5l11-2v12M9 9l11-2"/><ellipse cx="6" cy="18" rx="3" ry="2.5"/><ellipse cx="17" cy="16" rx="3" ry="2.5"/></svg>
+          </button>
+          <button id="open-dex" class="button secondary icon-button" aria-label="元件图鉴" title="元件图鉴">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c-3-2-7-2-10-1v15c3-1 7-1 10 1 3-2 7-2 10-1V4c-3-1-7-1-10 1Zm0 0v15M5 8h4M5 12h4m6-4h4m-4 4h4"/></svg>
+          </button>
         </div>
       </header>
       <div id="board" tabindex="0" role="application" aria-label="左右拖动瞄准，松手落下元件。也可使用左右方向键和空格。">
@@ -35,6 +63,7 @@
         <div id="danger-line"><span>警戒线</span></div>
         <div id="danger-warning" role="status">小心，元件快堆满了</div>
       </div>
+      <canvas id="effects" aria-hidden="true"></canvas>
       <footer class="footer">
         <div id="progress" class="progress" aria-label="合成进度"></div>
         <div id="hint" class="label">合成进度 1/10 · 点击屏幕落下元件</div>
@@ -43,31 +72,42 @@
 
     <section id="dex-screen" aria-label="元件图鉴" hidden>
       <header class="dex-header">
-        <button id="back" class="back-button">‹ 返回</button>
+        <button id="back" class="back-button"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m12 4-6 6 6 6"/></svg>返回</button>
         <h1>元件图鉴</h1>
-        <span id="dex-count" class="number">1/10</span>
+        <span id="dex-count" class="number accent">1/10</span>
       </header>
       <div class="dex-progress"><div id="dex-progress-fill"></div></div>
       <div id="dex-grid" class="dex-grid"></div>
     </section>
 
     <div id="over-screen" class="overlay" hidden>
-      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="over-title" tabindex="-1">
-        <h1 id="over-title">游戏结束</h1>
-        <p class="label over-subtitle">元件堆过警戒线</p>
+      <section class="modal glass" role="dialog" aria-modal="true" aria-labelledby="over-title" tabindex="-1">
+        <h1 id="over-title">本局结束</h1>
+        <p class="label over-subtitle">元件堆过了警戒线</p>
         <div class="round-scores">
           <div><div class="label">本局</div><div id="round-score" class="number">0</div></div>
           <div><div class="label">最高</div><div id="round-best" class="number accent">0</div><div id="new-record">新纪录</div></div>
         </div>
         <div class="round-part">
           <div id="round-piece"></div>
-          <div><div id="round-part-label" class="label accent">本局最高元件</div><h2 id="round-part-name">电阻</h2><p id="round-part-fact">阻碍电流，单位欧姆 Ω</p></div>
+          <div><div class="label accent">本局最高</div><h2 id="round-part-name">电阻</h2><p id="round-part-fact">阻碍电流，单位欧姆 Ω</p></div>
         </div>
         <button id="restart" class="button primary">再来一局</button>
         <button id="over-dex" class="button secondary">元件图鉴</button>
       </section>
     </div>
-    <div id="toast" role="status" aria-live="polite" hidden></div>
+
+    <div id="unlock-screen" class="overlay unlock-overlay" hidden>
+      <section class="unlock-card" role="dialog" aria-modal="true" aria-labelledby="unlock-name" aria-describedby="unlock-fact unlock-continue" tabindex="0">
+        <div id="unlock-level" class="label">NEW · LV.2</div>
+        <div id="unlock-piece"></div>
+        <h2 id="unlock-name">电容</h2>
+        <div class="card-rule"></div>
+        <p id="unlock-fact">通交流、隔直流</p>
+        <p id="unlock-number" class="number">No.02 / 10</p>
+      </section>
+      <div class="unlock-caption"><p class="label">解锁新元件</p><p id="unlock-continue">轻触任意处继续</p></div>
+    </div>
   </main>
 </body>
 </html>
