@@ -64,6 +64,7 @@
         <div id="danger-warning" role="status">小心，元件快堆满了</div>
       </div>
       <canvas id="effects" aria-hidden="true"></canvas>
+      <div id="unlock-toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
       <footer class="footer">
         <button id="clear-screen" class="clear-button" disabled aria-label="清屏，已充能，棋盘为空" aria-describedby="clear-status">
           <span class="charge-ring" aria-hidden="true"><svg viewBox="0 0 44 44"><circle class="charge-track" cx="22" cy="22" r="19"/><circle id="clear-ring" class="charge-fill" cx="22" cy="22" r="19" pathLength="1"/></svg><span>✧</span></span>
@@ -132,17 +133,6 @@
       </section>
     </div>
 
-    <div id="unlock-screen" class="overlay unlock-overlay" hidden>
-      <section class="unlock-card" role="dialog" aria-modal="true" aria-labelledby="unlock-name" aria-describedby="unlock-fact unlock-continue" tabindex="0">
-        <div id="unlock-level" class="label">NEW · LV.2</div>
-        <div id="unlock-piece"></div>
-        <h2 id="unlock-name">电容</h2>
-        <div class="card-rule"></div>
-        <p id="unlock-fact">通交流、隔直流</p>
-        <p id="unlock-number" class="number">No.02 / 10</p>
-      </section>
-      <div class="unlock-caption"><p class="label">解锁新元件</p><p id="unlock-continue">轻触任意处继续</p></div>
-    </div>
   </main>
 </body>
 </html>

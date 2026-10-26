@@ -298,7 +298,7 @@
   let dangerY = 74, boardX = 0, boardY = 0, walls = [];
   let score = 0, over = false, screen = 'title', highest = 1, roundBest = best;
   let held = 1, next = 1, aim = 0, heldX = 0, readyAt = 0, pointer = null;
-  let mergePairs = [], effects = [], unlockQueue = [], unlockShowing = false;
+  let mergePairs = [], effects = [], toastQueue = [], toastShowing = false, toastElapsed = 0;
   const COMBO_WINDOW = 1200, CLEAR_MERGES = 15, MAX_EFFECTS = 8, MAX_SPARKS = 6;
   let combo = 0, maxCombo = 0, merges = 0, comboUntil = 0;
   let feedbackTime = 0, roundTime = 0, hitStopUntil = 0;
@@ -306,7 +306,7 @@
   let cpuFlashAt = -Infinity, lastImpactSound = -Infinity;
   let clearProgress = CLEAR_MERGES, clearing = false, clearQueue = [], clearElapsed = 0, clearIndex = 0;
   let comboLabel = null;
-  let dexReturn = 'title', dexReturnFocus, unlockReturnFocus;
+  let dexReturn = 'title', dexReturnFocus;
   let settingsOpen = false, settingsReturnFocus;
   const pieces = () => Composite.allBodies(engine.world).filter(body => body.plugin.level);
   const now = () => engine.timing.timestamp;
@@ -314,7 +314,7 @@
   const randomLevel = () => { const r = Math.random(); return r < .5 ? 1 : r < .82 ? 2 : 3; };
   const radiusOf = level => LEVELS[level - 1][1] * scale / 2;
   const aimY = () => dangerY - radiusOf(held) - 6 * scale;
-  const roundActive = () => screen === 'game' && !over && !unlockShowing && !settingsOpen && !document.hidden;
+  const roundActive = () => screen === 'game' && !over && !settingsOpen && !document.hidden;
   const playing = () => roundActive() && !clearing;
   const clearReady = () => clearProgress >= CLEAR_MERGES;
   motionPreference.addEventListener?.('change', event => {
@@ -385,14 +385,13 @@
     $('game-screen').hidden = screen !== 'game' && screen !== 'over';
     $('dex-screen').hidden = screen !== 'dex';
     $('over-screen').hidden = screen !== 'over';
-    $('unlock-screen').hidden = !unlockShowing;
+    $('unlock-toast').hidden = !toastShowing || screen !== 'game' || settingsOpen;
     $('settings-screen').hidden = !settingsOpen;
     $('open-settings').setAttribute('aria-expanded', String(settingsOpen));
-    $('game-screen').inert = screen !== 'game' || unlockShowing || settingsOpen;
-    $('title-screen').inert = unlockShowing || settingsOpen;
-    $('dex-screen').inert = unlockShowing || settingsOpen;
-    $('over-screen').inert = unlockShowing || settingsOpen;
-    $('unlock-screen').inert = settingsOpen;
+    $('game-screen').inert = screen !== 'game' || settingsOpen;
+    $('title-screen').inert = settingsOpen;
+    $('dex-screen').inert = settingsOpen;
+    $('over-screen').inert = settingsOpen;
     pointer = null; accumulator = 0; needsRender = true; updateClearUI();
   }
   function openSettings() {
@@ -404,13 +403,9 @@
   function closeSettings() {
     if (!settingsOpen) return;
     settingsOpen = false; syncScreens();
-    if (!unlockShowing && unlockQueue.length && screen === 'game') showNextUnlock();
-    else {
-      const fallback = unlockShowing ? $('unlock-screen').querySelector('.unlock-card')
-        : screen === 'game' ? board : screen === 'dex' ? $('back') : screen === 'over' ? $('restart') : $('start');
-      (settingsReturnFocus?.isConnected && settingsReturnFocus !== document.body && !settingsReturnFocus.closest('[hidden], [inert]')
-        ? settingsReturnFocus : fallback).focus({ preventScroll: true });
-    }
+    const fallback = screen === 'game' ? board : screen === 'dex' ? $('back') : screen === 'over' ? $('restart') : $('start');
+    (settingsReturnFocus?.isConnected && settingsReturnFocus !== document.body && !settingsReturnFocus.closest('[hidden], [inert]')
+      ? settingsReturnFocus : fallback).focus({ preventScroll: true });
   }
   $('open-settings').addEventListener('click', openSettings);
   $('close-settings').addEventListener('click', closeSettings);
@@ -445,30 +440,45 @@
     $('open-settings').disabled = clearing; $('open-dex').disabled = clearing;
   }
   function preview() { $('next-piece').replaceChildren(component(next)); }
-  function showNextUnlock() {
-    if (unlockShowing || settingsOpen || !unlockQueue.length || screen !== 'game') return;
-    const level = unlockQueue.shift(); unlockShowing = true;
-    unlockReturnFocus = document.activeElement;
-    $('unlock-level').textContent = `NEW · LV.${level}`;
-    $('unlock-piece').replaceChildren(component(level));
-    $('unlock-name').textContent = LEVELS[level - 1][0];
-    $('unlock-fact').textContent = LEVELS[level - 1][2];
-    $('unlock-number').textContent = `No.${String(level).padStart(2, '0')} / 10`;
-    syncScreens(); $('unlock-screen').querySelector('.unlock-card').focus({ preventScroll: true });
+  function showNextToast() {
+    if (toastShowing || settingsOpen || document.hidden || !toastQueue.length || screen !== 'game') return;
+    const level = toastQueue.shift(), toast = document.createElement('div');
+    toast.className = 'unlock-toast';
+    const icon = component(level); icon.setAttribute('aria-hidden', 'true');
+    const copy = document.createElement('div'); copy.className = 'toast-copy';
+    const heading = document.createElement('p'); heading.className = 'toast-heading';
+    const label = document.createElement('span'); label.className = 'toast-label'; label.textContent = '解锁新元件';
+    const name = document.createElement('strong'); name.className = 'toast-name'; name.textContent = LEVELS[level - 1][0];
+    const fact = document.createElement('p'); fact.className = 'toast-fact'; fact.textContent = LEVELS[level - 1][2];
+    heading.append(label, name); copy.append(heading, fact); toast.append(icon, copy);
+    $('unlock-toast').replaceChildren(toast); $('unlock-toast').hidden = false;
+    toastShowing = true; toastElapsed = 0;
     haptic([12, 65, 20]); if (level < 10) sound('unlock', level);
   }
+  function clearToasts() {
+    toastQueue = []; toastShowing = false; toastElapsed = 0;
+    $('unlock-toast').hidden = true; $('unlock-toast').replaceChildren();
+  }
+  function tickToast(delta) {
+    // UI time is independent of physics, hit-stop and the combo window.
+    if (document.hidden || screen !== 'game' || settingsOpen) return;
+    if (!toastShowing) { showNextToast(); return; }
+    toastElapsed += delta;
+    const duration = toastQueue.length > 2 ? 1400 : 2000;
+    if (toastElapsed >= duration) {
+      toastShowing = false; $('unlock-toast').hidden = true; $('unlock-toast').replaceChildren();
+      showNextToast();
+    } else if (toastElapsed >= duration - 180) $('unlock-toast').firstElementChild.classList.add('is-leaving');
+  }
   function dismissUnlock() {
-    if (!unlockShowing) return;
-    unlockShowing = false; syncScreens();
-    if (unlockQueue.length) showNextUnlock();
-    else if (screen === 'game') (unlockReturnFocus?.isConnected && !unlockReturnFocus.closest('[hidden]') ? unlockReturnFocus : board).focus({ preventScroll: true });
+    // Legacy hook: discoveries no longer block play or need dismissal.
   }
   function unlock(level) {
     const previousHighest = highest;
     highest = Math.max(highest, level);
     if (!unlocked.has(level)) {
       unlocked.add(level); write('unlocked', [...unlocked].sort((a, b) => a - b));
-      unlockQueue.push(level); showNextUnlock(); updateProgress();
+      toastQueue.push(level); showNextToast(); updateProgress();
     } else if (highest !== previousHighest) updateProgress();
   }
   function spawn(level, x = width / 2, y = height / 3, merged = false) {
@@ -566,8 +576,6 @@
       if (target === 10 && level < 10) celebrateCPU();
       else sound('merge', target, combo);
       updateClearUI();
-      // A discovery freezes the world at this exact simulation step.
-      if (unlockShowing) break;
     }
     mergePairs = [];
   }
@@ -624,7 +632,7 @@
   }
   function gameOver() {
     if (over) return;
-    over = true; screen = 'over'; unlockShowing = false; unlockQueue = [];
+    over = true; screen = 'over'; clearToasts();
     clearing = false; clearQueue = []; endCombo(); hitStopUntil = 0;
     board.classList.remove('danger');
     $('round-score').textContent = format(score); $('round-best').textContent = format(best);
@@ -641,7 +649,7 @@
     clearing = false; clearQueue = []; clearElapsed = clearIndex = 0; clearProgress = CLEAR_MERGES;
     hitStopUntil = shakeUntil = shakePower = shakeX = shakeY = heldSway = 0;
     cpuFlashAt = lastImpactSound = -Infinity; $('cpu-flash').hidden = true;
-    screen = 'game'; unlockShowing = false; unlockQueue = []; settingsOpen = false;
+    screen = 'game'; clearToasts(); settingsOpen = false;
     held = randomLevel(); next = randomLevel(); aim = heldX = width / 2; readyAt = 0;
     board.classList.remove('danger'); updateScore(); updateProgress(); preview(); clampAim(); syncScreens();
   }
@@ -650,7 +658,7 @@
     board.focus({ preventScroll: true });
   }
   function openDex() {
-    if (screen === 'dex' || unlockShowing || settingsOpen || clearing) return;
+    if (screen === 'dex' || settingsOpen || clearing) return;
     dexReturn = screen; dexReturnFocus = document.activeElement; screen = 'dex';
     $('dex-count').textContent = `${unlocked.size}/10`; $('dex-progress-fill').style.width = `${unlocked.size * 10}%`;
     $('dex-grid').replaceChildren(...LEVELS.map(([name, , fact], i) => {
@@ -674,7 +682,6 @@
   $('start').addEventListener('click', start); $('restart').addEventListener('click', start);
   for (const id of ['open-dex', 'over-dex', 'title-dex']) $(id).addEventListener('click', openDex);
   $('back').addEventListener('click', closeDex);
-  $('unlock-screen').addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); dismissUnlock(); });
 
   function point(event) {
     const rect = board.getBoundingClientRect(); aim = event.clientX - rect.left - board.clientLeft; clampAim();
@@ -708,13 +715,8 @@
       }
       return;
     }
-    if (unlockShowing && ['Escape', ' ', 'Enter'].includes(event.key)) {
-      event.preventDefault(); if (!event.repeat) dismissUnlock(); return;
-    }
     if (event.key === 'Escape' && screen === 'dex') closeDex();
-    if (event.key === 'Tab' && unlockShowing) {
-      event.preventDefault(); $('unlock-screen').querySelector('.unlock-card').focus();
-    } else if (event.key === 'Tab' && screen === 'over') {
+    if (event.key === 'Tab' && screen === 'over') {
       const first = $('restart'), last = $('over-dex');
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
@@ -882,7 +884,7 @@
           let steps = 0;
           while (accumulator >= 1000 / 60 && steps++ < 5) {
             Engine.update(engine, 1000 / 60); merge();
-            if (!unlockShowing) danger();
+            danger();
             accumulator -= 1000 / 60;
             if (!playing() || feedbackTime < hitStopUntil) { accumulator = 0; break; }
           }
@@ -897,8 +899,9 @@
     if ((screen === 'game' || screen === 'over') && needsRender && !document.hidden) {
       renderBoard(); renderEffects(); needsRender = false;
     }
+    tickToast(delta);
     // Eleven inexpensive sprites at 30 Hz; reduced-motion users get a still image.
-    if (!document.hidden && !unlockShowing && screen !== 'over' && ((!reducedMotion && time - lastDust >= 32) || lastDust === 0)) {
+    if (!document.hidden && screen !== 'over' && ((!reducedMotion && time - lastDust >= 32) || lastDust === 0)) {
       renderDust(time); lastDust = time;
     }
     requestAnimationFrame(frame);
@@ -912,7 +915,7 @@
   window.__game = {
     spawn(level, x, y) { const body = spawn(level, x, y); return { level: body.plugin.level, x: body.position.x, y: body.position.y }; },
     state() { return { score, best, bodies: pieces().map(body => ({ level: body.plugin.level, x: body.position.x, y: body.position.y })),
-      over, screen, unlockShowing, settingsOpen, sfxVolume, musicVolume,
+      over, screen, unlockShowing: false, toastShowing, toastQueue: toastQueue.length, settingsOpen, sfxVolume, musicVolume,
       combo, maxCombo, merges, clearCharge: clearProgress / CLEAR_MERGES, clearReady: clearReady(), clearing, topLevel: highest }; },
     clearScreen,
     setClearCharge,
