@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#15181b">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="description" content="从电阻到 CPU，合成你的元件宇宙。">
+  <link rel="icon" href="data:,">
+  <title>元件合成</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="vendor/matter.min.js"></script>
+  <script defer src="game.js"></script>
+</head>
+<body>
+  <main id="app" aria-label="元件合成">
+    <section id="game-screen" aria-label="合成游戏">
+      <header class="hud">
+        <div class="scores">
+          <div class="label">分数</div>
+          <div id="score" class="number score">0</div>
+          <div class="label best-label">最高 <span id="best" class="number accent">0</span></div>
+        </div>
+        <div class="next">
+          <div class="label">下一个</div>
+          <div id="next-piece" class="next-piece"></div>
+        </div>
+        <div class="tools">
+          <button id="mute" class="button secondary icon-button" aria-label="关闭声音" aria-pressed="false" title="关闭声音">♪</button>
+          <button id="open-dex" class="button secondary icon-button dex-button" aria-label="元件图鉴" title="元件图鉴">图鉴</button>
+        </div>
+      </header>
+      <div id="board" tabindex="0" role="application" aria-label="左右拖动瞄准，松手落下元件。也可使用左右方向键和空格。">
+        <canvas id="canvas" aria-label="元件合成游戏区域"></canvas>
+        <div id="danger-line"><span>警戒线</span></div>
+        <div id="danger-warning" role="status">小心，元件快堆满了</div>
+      </div>
+      <footer class="footer">
+        <div id="progress" class="progress" aria-label="合成进度"></div>
+        <div id="hint" class="label">合成进度 1/10 · 点击屏幕落下元件</div>
+      </footer>
+    </section>
+
+    <section id="dex-screen" aria-label="元件图鉴" hidden>
+      <header class="dex-header">
+        <button id="back" class="back-button">‹ 返回</button>
+        <h1>元件图鉴</h1>
+        <span id="dex-count" class="number">1/10</span>
+      </header>
+      <div class="dex-progress"><div id="dex-progress-fill"></div></div>
+      <div id="dex-grid" class="dex-grid"></div>
+    </section>
+
+    <div id="over-screen" class="overlay" hidden>
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="over-title" tabindex="-1">
+        <h1 id="over-title">游戏结束</h1>
+        <p class="label over-subtitle">元件堆过警戒线</p>
+        <div class="round-scores">
+          <div><div class="label">本局</div><div id="round-score" class="number">0</div></div>
+          <div><div class="label">最高</div><div id="round-best" class="number accent">0</div><div id="new-record">新纪录</div></div>
+        </div>
+        <div class="round-part">
+          <div id="round-piece"></div>
+          <div><div id="round-part-label" class="label accent">本局最高元件</div><h2 id="round-part-name">电阻</h2><p id="round-part-fact">阻碍电流，单位欧姆 Ω</p></div>
+        </div>
+        <button id="restart" class="button primary">再来一局</button>
+        <button id="over-dex" class="button secondary">元件图鉴</button>
+      </section>
+    </div>
+    <div id="toast" role="status" aria-live="polite" hidden></div>
+  </main>
+</body>
+</html>
