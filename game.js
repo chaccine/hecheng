@@ -233,7 +233,7 @@
       const description = document.createElement('p'); description.textContent = known ? fact : '未解锁';
       cell.append(disc, title, description); return cell;
     }));
-    $('back').focus();
+    $('back').focus(); clearTimeout(toastTimer); $('toast').hidden = true;
   }
   function closeDex() {
     dex = false; $('dex-screen').hidden = true; $('game-screen').hidden = false; $('over-screen').hidden = !over;
