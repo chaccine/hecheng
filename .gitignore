@@ -1,0 +1,7 @@
+shots-tilt/
+.codex-*
+codex-*.log
+PROMPT*.md
+*.log
+node_modules/
+.playwright-mcp/

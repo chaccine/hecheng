@@ -10,6 +10,7 @@
   <title>元件合成 2.0</title>
   <link rel="stylesheet" href="style.css">
   <script defer src="vendor/matter.min.js"></script>
+  <script defer src="tilt.js"></script>
   <script defer src="game.js"></script>
 </head>
 <body>
@@ -29,10 +30,13 @@
         <p class="label">从一颗电阻，到一枚 CPU</p>
       </div>
       <div class="title-actions">
-        <button id="start" class="button primary">开始</button>
+        <div class="mode-actions">
+          <button id="start" class="button primary">开始</button>
+          <button id="start-tilt" class="button secondary">摇摆模式</button>
+        </div>
         <button id="title-dex" class="button secondary">元件图鉴 <span id="title-count" class="number">1/10</span></button>
       </div>
-      <p class="title-best label">最高分 <span id="title-best" class="number accent">0</span></p>
+      <p class="title-best label">普通最高 <span id="title-best" class="number accent">0</span><br>摇摆最高 <span id="title-tilt-best" class="number accent">0</span></p>
     </section>
 
     <section id="game-screen" aria-label="合成游戏" hidden>
@@ -58,6 +62,17 @@
           </button>
         </div>
       </header>
+      <div id="tilt-controls" hidden>
+        <div class="tilt-row">
+          <button id="tilt-toggle" class="button secondary" aria-pressed="true">摇摆：开</button>
+          <div id="tilt-pad" role="slider" tabindex="0" aria-label="左右拖动模拟摇摆，松手回正" aria-valuemin="-38" aria-valuemax="38" aria-valuenow="0">
+            <span class="tilt-track" aria-hidden="true"><span id="tilt-bubble"></span></span>
+            <span id="tilt-angle" class="number" aria-hidden="true">0°</span>
+          </div>
+          <button id="tilt-permission" class="button secondary" hidden>启用体感</button>
+        </div>
+        <p id="tilt-status" role="status" aria-live="polite"></p>
+      </div>
       <div id="board" tabindex="0" role="application" aria-label="左右拖动瞄准，松手落下元件。也可使用左右方向键和空格。">
         <canvas id="canvas" aria-label="元件合成游戏区域"></canvas>
         <div id="danger-line"><span>警戒线</span></div>
@@ -118,7 +133,7 @@
         <p class="label over-subtitle">元件堆过了警戒线</p>
         <div class="round-scores">
           <div><div class="label">本局</div><div id="round-score" class="number">0</div></div>
-          <div><div class="label">最高</div><div id="round-best" class="number accent">0</div><div id="new-record">新纪录</div></div>
+          <div><div id="round-best-label" class="label">最高</div><div id="round-best" class="number accent">0</div><div id="new-record">新纪录</div></div>
         </div>
         <dl class="round-stats">
           <div><dt>合成次数</dt><dd id="round-merges" class="number">0</dd></div>

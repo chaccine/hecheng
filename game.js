@@ -21,8 +21,13 @@
   const write = (key, value) => {
     try { localStorage.setItem('hecheng-' + key, JSON.stringify(value)); } catch { /* Storage is optional. */ }
   };
-  let best = read('best', 0);
-  best = Number.isFinite(best) && best >= 0 ? Math.floor(best) : 0;
+  const savedBest = key => {
+    const value = read(key, 0);
+    return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+  };
+  const bests = { normal: savedBest('best'), tilt: savedBest('tilt-best') };
+  let mode = 'normal', best = bests.normal;
+  const bestKey = () => mode === 'tilt' ? 'tilt-best' : 'best';
   const savedUnlocks = read('unlocked', [1]);
   const unlocked = new Set([1, ...(Array.isArray(savedUnlocks) ? savedUnlocks.filter(n => Number.isInteger(n) && n >= 1 && n <= 10) : [])]);
   let muted = read('muted', false) === true;
@@ -316,6 +321,8 @@
   const aimY = () => dangerY - radiusOf(held) - 6 * scale;
   const roundActive = () => screen === 'game' && !over && !settingsOpen && !document.hidden;
   const playing = () => roundActive() && !clearing;
+  const tilt = createTiltController({ gravity: engine.gravity, canPlay: playing,
+    wake: () => pieces().forEach(body => { if (body.isSleeping) Sleeping.set(body, false); }) });
   const clearReady = () => clearProgress >= CLEAR_MERGES;
   motionPreference.addEventListener?.('change', event => {
     reducedMotion = event.matches; shakeX = shakeY = heldSway = 0;
@@ -381,6 +388,7 @@
   }
 
   function syncScreens() {
+    tilt.suspend();
     $('title-screen').hidden = screen !== 'title';
     $('game-screen').hidden = screen !== 'game' && screen !== 'over';
     $('dex-screen').hidden = screen !== 'dex';
@@ -421,11 +429,12 @@
     $('title-count').textContent = `${unlocked.size}/10`;
   }
   function updateScore() {
-    $('score').textContent = format(score); $('best').textContent = format(best); $('title-best').textContent = format(best);
+    $('score').textContent = format(score); $('best').textContent = format(best);
+    $('title-best').textContent = format(bests.normal); $('title-tilt-best').textContent = format(bests.tilt);
   }
   function award(points) {
     score += points;
-    if (score > best) { best = score; write('best', best); }
+    if (score > best) { best = score; bests[mode] = best; write(bestKey(), best); }
     updateScore();
   }
   function updateClearUI() {
@@ -636,6 +645,8 @@
     clearing = false; clearQueue = []; endCombo(); hitStopUntil = 0;
     board.classList.remove('danger');
     $('round-score').textContent = format(score); $('round-best').textContent = format(best);
+    $('round-best-label').textContent = mode === 'tilt' ? '摇摆最高' : '最高';
+    $('over-screen').querySelector('.over-subtitle').textContent = `${mode === 'tilt' ? '摇摆模式 · ' : ''}元件堆过了警戒线`;
     $('new-record').style.visibility = score > roundBest ? 'visible' : 'hidden';
     $('round-merges').textContent = format(merges); $('round-combo').textContent = `×${maxCombo}`;
     $('round-piece').replaceChildren(component(highest));
@@ -643,6 +654,7 @@
     syncScreens(); $('restart').focus({ preventScroll: true }); sound('over');
   }
   function reset() {
+    tilt.reset(mode === 'tilt');
     for (const body of pieces()) Composite.remove(engine.world, body);
     Engine.clear(engine); mergePairs = []; effects = []; score = 0; over = false; highest = 1; roundBest = best;
     combo = maxCombo = merges = roundTime = comboUntil = 0; comboLabel = null; intensifyMusic(0);
@@ -653,7 +665,11 @@
     held = randomLevel(); next = randomLevel(); aim = heldX = width / 2; readyAt = 0;
     board.classList.remove('danger'); updateScore(); updateProgress(); preview(); clampAim(); syncScreens();
   }
-  function start() {
+  function start(selectedMode = mode) {
+    mode = selectedMode === 'tilt' ? 'tilt' : 'normal'; best = bests[mode];
+    board.setAttribute('aria-label', mode === 'tilt'
+      ? '拖动瞄准，松手落下元件；左右方向键或 A D 摇摆，空格落下。也可拖动上方水平仪。'
+      : '左右拖动瞄准，松手落下元件。也可使用左右方向键和空格。');
     reset(); if (musicOn) startMusic();
     board.focus({ preventScroll: true });
   }
@@ -679,7 +695,9 @@
     screen = dexReturn; syncScreens();
     (dexReturnFocus?.isConnected ? dexReturnFocus : screen === 'title' ? $('start') : screen === 'over' ? $('restart') : board).focus({ preventScroll: true });
   }
-  $('start').addEventListener('click', start); $('restart').addEventListener('click', start);
+  $('start').addEventListener('click', () => start('normal'));
+  $('start-tilt').addEventListener('click', () => start('tilt'));
+  $('restart').addEventListener('click', () => start(mode));
   for (const id of ['open-dex', 'over-dex', 'title-dex']) $(id).addEventListener('click', openDex);
   $('back').addEventListener('click', closeDex);
 
@@ -700,8 +718,8 @@
   board.addEventListener('keydown', event => {
     if (!playing()) return;
     if (['ArrowLeft', 'ArrowRight', ' ', 'Enter'].includes(event.key)) event.preventDefault();
-    if (event.key === 'ArrowLeft') aim -= 16 * scale;
-    if (event.key === 'ArrowRight') aim += 16 * scale;
+    if (mode === 'normal' && event.key === 'ArrowLeft') aim -= 16 * scale;
+    if (mode === 'normal' && event.key === 'ArrowRight') aim += 16 * scale;
     clampAim(); if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) drop();
   });
   document.addEventListener('keydown', event => {
@@ -883,7 +901,19 @@
           accumulator += delta;
           let steps = 0;
           while (accumulator >= 1000 / 60 && steps++ < 5) {
-            Engine.update(engine, 1000 / 60); merge();
+            if (mode === 'tilt') {
+              // Two small steps plus a speed cap keep travel far below the 60px
+              // walls, even at maximum tilt. Normal mode retains its exact step.
+              for (let substep = 0; substep < 2; substep++) {
+                tilt.update(1000 / 120);
+                for (const body of pieces()) {
+                  const speed = Math.hypot(body.velocity.x, body.velocity.y), limit = 12 * scale;
+                  if (speed > limit) Body.setVelocity(body, { x: body.velocity.x * limit / speed, y: body.velocity.y * limit / speed });
+                }
+                Engine.update(engine, 1000 / 120);
+              }
+            } else Engine.update(engine, 1000 / 60);
+            merge();
             danger();
             accumulator -= 1000 / 60;
             if (!playing() || feedbackTime < hitStopUntil) { accumulator = 0; break; }
@@ -914,7 +944,9 @@
   }))).then(() => { prepareSprites(); paintBackground(); needsRender = true; });
   window.__game = {
     spawn(level, x, y) { const body = spawn(level, x, y); return { level: body.plugin.level, x: body.position.x, y: body.position.y }; },
-    state() { return { score, best, bodies: pieces().map(body => ({ level: body.plugin.level, x: body.position.x, y: body.position.y })),
+    state() { return { score, best, mode, bestKey: 'hecheng-' + bestKey(), tilt: tilt.state(),
+      gravity: { x: engine.gravity.x, y: engine.gravity.y }, width, height,
+      bodies: pieces().map(body => ({ level: body.plugin.level, x: body.position.x, y: body.position.y, radius: radiusOf(body.plugin.level), sleeping: body.isSleeping })),
       over, screen, unlockShowing: false, toastShowing, toastQueue: toastQueue.length, settingsOpen, sfxVolume, musicVolume,
       combo, maxCombo, merges, clearCharge: clearProgress / CLEAR_MERGES, clearReady: clearReady(), clearing, topLevel: highest }; },
     clearScreen,

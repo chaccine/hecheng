@@ -34,9 +34,22 @@ body.kbd button:focus-visible,body.kbd input:focus-visible,body.kbd #board:focus
 .title-copy h1{font-size:calc(40 * var(--u));font-weight:300;letter-spacing:calc(14 * var(--u));text-indent:calc(14 * var(--u));color:var(--ink);text-shadow:0 2px 20px #0008}
 .title-copy p{margin-top:calc(12 * var(--u));letter-spacing:calc(5 * var(--u));text-indent:calc(5 * var(--u))}
 .title-actions{position:absolute;left:calc(56 * var(--u));right:calc(56 * var(--u));bottom:17.8%}
+.mode-actions{display:flex;gap:calc(10 * var(--u))}.mode-actions .button{flex:1}
 #title-dex{margin-top:calc(12 * var(--u))}
 #title-count{opacity:.6;letter-spacing:0;margin-left:calc(4 * var(--u))}
-.title-best{position:absolute;bottom:6.6%;width:100%;text-align:center;opacity:.75}
+.title-best{position:absolute;bottom:6.6%;width:100%;text-align:center;opacity:.75;line-height:2}
+#tilt-controls{position:absolute;top:calc(120 * var(--u));left:calc(20 * var(--u));right:calc(20 * var(--u));z-index:3}
+.tilt-row{display:flex;align-items:center;gap:calc(8 * var(--u))}
+.tilt-row .button{width:auto;flex:none;padding:calc(9 * var(--u)) calc(10 * var(--u));font-size:calc(11 * var(--u));letter-spacing:calc(1 * var(--u));border-radius:calc(10 * var(--u))}
+#tilt-toggle[aria-pressed="true"]{color:var(--accent);border-color:#e0b47a55;background:#e0b47a12}
+#tilt-pad{display:flex;align-items:center;gap:calc(7 * var(--u));flex:1;min-width:0;height:calc(36 * var(--u));padding:calc(8 * var(--u));border:1px solid #e0b47a33;border-radius:calc(12 * var(--u));background:#0002;cursor:ew-resize;touch-action:none}
+body.kbd #tilt-pad:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+#tilt-pad[aria-disabled="true"]{opacity:.45;cursor:default}
+.tilt-track{position:relative;display:block;flex:1;height:calc(10 * var(--u));border-radius:999px;background:linear-gradient(#1b1714,#564332);box-shadow:inset 0 1px 3px #0008}
+.tilt-track:before{content:"";position:absolute;left:50%;top:calc(-3 * var(--u));height:calc(16 * var(--u));border-left:1px solid #e0b47a66}
+#tilt-bubble{position:absolute;left:50%;top:50%;width:calc(9 * var(--u));height:calc(9 * var(--u));transform:translate(-50%,-50%);border:1px solid #ffe2b5;border-radius:50%;background:radial-gradient(circle at 30% 25%,#fff1d6,#d4a466);box-shadow:0 0 8px #e0b47a77}
+#tilt-angle{width:calc(29 * var(--u));font-size:calc(10 * var(--u));color:var(--accent);text-align:right}
+#tilt-status{margin-top:calc(4 * var(--u));font-size:calc(9 * var(--u));line-height:1.5;color:var(--muted);text-align:center}
 .hud{position:absolute;top:calc(46 * var(--u));left:calc(20 * var(--u));right:calc(20 * var(--u));display:flex;justify-content:space-between;align-items:flex-start;z-index:3}
 .score{font-size:calc(34 * var(--u));line-height:1.3;letter-spacing:calc(-1 * var(--u));color:#fbf3e8}
 .best-label{margin-top:calc(2 * var(--u))}
